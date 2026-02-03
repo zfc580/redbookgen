@@ -13,7 +13,7 @@ if (process.env.HTTPS_PROXY) {
 
 const API_KEY = process.env.GOOGLE_API_KEY;
 // User requested specifically this model
-const MODEL_NAME = 'gemini-3-pro-image-preview'; 
+const MODEL_NAME = 'gemini-3-pro-image-preview';
 const INPUT_FILE = process.argv[2] || 'input.json';
 const TEMPLATE_FILE = path.join(__dirname, '../assets/example_asset.txt');
 const OUTPUT_DIR = 'output';
@@ -27,14 +27,14 @@ async function main() {
   try {
     const inputPath = path.resolve(INPUT_FILE);
     if (!fs.existsSync(inputPath)) {
-        console.error(`Error: Input file not found at ${inputPath}`);
-        process.exit(1);
+      console.error(`Error: Input file not found at ${inputPath}`);
+      process.exit(1);
     }
     const pages = JSON.parse(fs.readFileSync(inputPath, 'utf8'));
 
     if (!fs.existsSync(TEMPLATE_FILE)) {
-        console.error(`Error: Template file not found at ${TEMPLATE_FILE}`);
-        process.exit(1);
+      console.error(`Error: Template file not found at ${TEMPLATE_FILE}`);
+      process.exit(1);
     }
     const template = fs.readFileSync(TEMPLATE_FILE, 'utf8');
 
@@ -50,14 +50,14 @@ async function main() {
       const page = pages[i];
       const content = page.content || page.description || JSON.stringify(page);
       const fullPrompt = template.replace('$CONTENT$', content);
-      
+
       console.log(`
 [Page ${i + 1}/${pages.length}] Generating...`);
-      
+
       // Documentation: https://ai.google.dev/gemini-api/docs/image-generation
       // Using generateContent endpoint for Gemini models
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${API_KEY}`;
-      
+
       const payload = {
         contents: [
           { parts: [{ text: fullPrompt }] }
@@ -66,8 +66,8 @@ async function main() {
         // but often the prompt itself is enough.
         // We do NOT set responseMimeType to image/jpeg as it previously caused errors.
         generationConfig: {
-            // Optional: You can try to guide parameters here if the model supports them
-            // candidateCount: 1
+          // Optional: You can try to guide parameters here if the model supports them
+          // candidateCount: 1
         }
       };
 
@@ -81,47 +81,47 @@ async function main() {
         const data = await response.json();
 
         if (data.error) {
-            console.error(`API Error: ${data.error.message}`);
-            // Log full error details for debugging
-            if (data.error.details) console.error('Details:', JSON.stringify(data.error.details));
-            continue;
+          console.error(`API Error: ${data.error.message}`);
+          // Log full error details for debugging
+          if (data.error.details) console.error('Details:', JSON.stringify(data.error.details));
+          continue;
         }
 
         // Gemini native image generation returns the image inside the candidates
         // Structure: candidates[0].content.parts[].inlineData
         if (data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts) {
-            let imageFound = false;
-            
-            for (const part of data.candidates[0].content.parts) {
-                // Case 1: Inline Data (Base64)
-                if (part.inlineData && part.inlineData.mimeType.startsWith('image/')) {
-                    const b64Data = part.inlineData.data;
-                    const buffer = Buffer.from(b64Data, 'base64');
-                    const filename = `page_${String(i + 1).padStart(2, '0')}.png`;
-                    const outputPath = path.join(OUTPUT_DIR, filename);
-                    fs.writeFileSync(outputPath, buffer);
-                    console.log(`Saved: ${outputPath}`);
-                    imageFound = true;
-                    break;
-                }
-                
-                // Case 2: Executable Code (The model might write code to generate the image? Unlikely for this endpoint but possible)
-                
-                // Case 3: Text refusal
-                if (part.text) {
-                    // If we got text but no image, the model likely refused or chatted instead.
-                    console.log('Model returned text (first 100 chars):', part.text.substring(0, 100));
-                }
+          let imageFound = false;
+
+          for (const part of data.candidates[0].content.parts) {
+            // Case 1: Inline Data (Base64)
+            if (part.inlineData && part.inlineData.mimeType.startsWith('image/')) {
+              const b64Data = part.inlineData.data;
+              const buffer = Buffer.from(b64Data, 'base64');
+              const filename = `page_${String(i + 1).padStart(2, '0')}.png`;
+              const outputPath = path.join(OUTPUT_DIR, filename);
+              fs.writeFileSync(outputPath, buffer);
+              console.log(`Saved: ${outputPath}`);
+              imageFound = true;
+              break;
             }
 
-            if (!imageFound) {
-                console.warn('Response received but no inline image data found.');
-                // console.log('Full Response:', JSON.stringify(data));
+            // Case 2: Executable Code (The model might write code to generate the image? Unlikely for this endpoint but possible)
+
+            // Case 3: Text refusal
+            if (part.text) {
+              // If we got text but no image, the model likely refused or chatted instead.
+              console.log('Model returned text (first 100 chars):', part.text.substring(0, 100));
             }
+          }
+
+          if (!imageFound) {
+            console.warn('Response received but no inline image data found.');
+            // console.log('Full Response:', JSON.stringify(data));
+          }
 
         } else {
-            console.warn('No valid candidates returned.');
-            console.log('Response:', JSON.stringify(data));
+          console.warn('No valid candidates returned.');
+          console.log('Response:', JSON.stringify(data));
         }
 
       } catch (err) {

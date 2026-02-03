@@ -53,7 +53,7 @@ Output Format:
 
 Ratio: A vertical 3:4 aspect ratio (ideal for mobile viewing/Xiaohongshu).
 
-Quality: High-resolution photograph, sharp focus on the main elements, with a slight depth of field.  
+Quality: High-resolution photograph, sharp focus on the main elements, with a slight depth of field. 
 
 user's input: $CONTENT$
 
