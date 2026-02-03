@@ -1,0 +1,9 @@
+Create a professional, engaging infographic illustration based on the following description:
+
+$CONTENT$
+
+Style Guidelines:
+- Visual Style: Clean, modern, flat vector art aesthetic.
+- Color Palette: Vibrant but professional.
+- Layout: Clear and easy to understand.
+- No text: Avoid generating legible text inside the image unless necessary (simulated text is preferred).

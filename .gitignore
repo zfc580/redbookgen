@@ -1,0 +1,17 @@
+# Dependencies
+node_modules/
+
+# Environment variables
+.env
+
+# Output directory (generated images)
+output/
+
+# Temporary files
+verify_encoding.js
+debug_verification.txt
+*.log
+
+# System files
+.DS_Store
+Thumbs.db
