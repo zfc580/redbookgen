@@ -13,10 +13,22 @@ if (process.env.HTTPS_PROXY) {
 
 const API_KEY = process.env.GOOGLE_API_KEY;
 // User requested specifically this model
+// --- Argument Parsing ---
+const args = process.argv.slice(2);
+let INPUT_FILE = 'input.json';
+let OUTPUT_DIR = 'output';
+
+for (let i = 0; i < args.length; i++) {
+  if (args[i] === '--output-dir') {
+    OUTPUT_DIR = args[i + 1];
+    i++; // skip next arg
+  } else if (!args[i].startsWith('--')) {
+    INPUT_FILE = args[i];
+  }
+}
+
 const MODEL_NAME = 'gemini-3-pro-image-preview';
-const INPUT_FILE = process.argv[2] || 'input.json';
 const TEMPLATE_FILE = path.join(__dirname, '../assets/example_asset.txt');
-const OUTPUT_DIR = 'output';
 
 if (!API_KEY) {
   console.error('Error: GOOGLE_API_KEY is not set in .env file.');

@@ -15,3 +15,11 @@ debug_verification.txt
 # System files
 .DS_Store
 Thumbs.db
+
+# Workspace and User Data
+workspace/
+xiaohongshu-parser/user_data/
+xiaohongshu-publisher/user_data_temp_*/
+
+xiaohongshu-parser/cookies.json
+

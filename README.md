@@ -58,6 +58,71 @@
 *   **实现策略**:
     *   **浏览器自动化**: 扫码登录（首次），然后自动填写上传表单。
 
+## 数据交互协议：基于文件的解耦设计 (File-Based Decoupling)
+
+为了确保每个 Skill 都能独立运行（方便测试和调试），我们采用**标准文件流（File-Based Pipeline）**作为交互协议。各模块之间**不通过内存变量调用**，而是通过**标准 JSON 文件**交换数据。
+
+### 1. 统一工作流目录 (Workspace)
+建议每次执行任务时，创建一个唯一的任务目录（如 `workspace/task_20231027_001/`），所有流程产生的中间文件都保存在这里。
+
+### 2. 详细数据流与独立运行命令
+
+#### A. 解析器 (Parser) - "获取素材"
+*   **独立运行命令**:
+    ```bash
+    node xiaohongshu-parser/index.js --url "https://..." --output "workspace/task_001/01_raw.json"
+    ```
+*   **输出定义** (`01_raw.json`):
+    ```json
+    {
+      "meta": { "url": "...", "timestamp": "..." },
+      "data": {
+        "title": "原始笔记标题",
+        "description": "原始笔记正文",
+        "image_urls": ["...", "..."],
+        "ocr_texts": ["图1文字", "图2文字"]
+      }
+    }
+    ```
+
+#### B. 策划师 (Planner) - "加工思考"
+*   **独立运行命令**:
+    ```bash
+    node content-planner/index.js --input "workspace/task_001/01_raw.json" --output-dir "workspace/task_001/"
+    ```
+*   **输出定义**:
+    1.  **`02_draft.json`** (供发布器使用):
+        ```json
+        {
+          "title": "生成的新标题",
+          "content": "生成的新正文(带tag)"
+        }
+        ```
+    2.  **`02_visual_input.json`** (供绘图师使用 - 符合Generator输入标准):
+        ```json
+        [
+          { "id": 1, "content": "封面设计指令..." },
+          { "id": 2, "content": "内容页1设计指令..." }
+        ]
+        ```
+
+#### C. 绘图师 (Generator) - "生产物料"
+*   **独立运行命令**:
+    ```bash
+    node infographic-generator/scripts/generate.js "workspace/task_001/02_visual_input.json" --output-dir "workspace/task_001/images/"
+    ```
+*   **输出结果**:
+    *   目录 `workspace/task_001/images/` 下生成的 `.png` 图片文件。
+
+#### D. 发布器 (Publisher) - "执行动作"
+*   **独立运行命令**:
+    ```bash
+    node xiaohongshu-publisher/index.js --draft "workspace/task_001/02_draft.json" --images "workspace/task_001/images/"
+    ```
+*   **逻辑**: 读取 JSON 中的标题/正文，并按顺序上传 Images 目录下的图片。
+
+---
+
 ## 工作流编排 (Agent Orchestration)
 
 1.  **User** 配置目标 URL。
