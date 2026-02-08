@@ -76,18 +76,36 @@ async function main() {
         await page.screenshot({ path: path.join(imagesDir, 'debug_03_logged_in.png') });
 
         // 4. Upload Images
-        console.log('Uploading images...');
+        console.log('Switching to Image Tab...');
 
-        // Strategy: Verify we are on the right tab "图文" (Image/Text)
-        // sometimes XHS defaults to Video.
+        // Robust Tab Switching Logic
+        // We need to find the tab that contains text "图文" (Image/Text) and click it.
         try {
-            const tabs = await page.$x('//div[contains(text(), "图文")]');
-            if (tabs.length > 0) {
-                await tabs[0].click();
-                await new Promise(r => setTimeout(r, 1000));
+            // Wait for tabs to render
+            await page.waitForSelector('div, span', { timeout: 10000 });
+
+            const clicked = await page.evaluate(() => {
+                // Find all elements that might be the tab
+                const elements = Array.from(document.querySelectorAll('div, span, li, .title'));
+                for (const el of elements) {
+                    // Match "上传图文" exactly or "图文"
+                    // The text dump shows "上传图文" in a span.title
+                    if (el.innerText && (el.innerText.trim() === '上传图文' || el.innerText.trim() === '图文')) {
+                        el.click();
+                        return true;
+                    }
+                }
+                return false;
+            });
+
+            if (clicked) {
+                console.log('Clicked "Image/Text" tab via DOM evaluation.');
+                await new Promise(r => setTimeout(r, 2000)); // Wait for UI switch
+            } else {
+                console.warn('Could not identify "Image" tab. Assuming default or manual intervention needed.');
             }
         } catch (e) {
-            console.log('Tab switching optional/failed, proceeding...');
+            console.error('Tab switching error:', e);
         }
 
         // Click the upload area first to wake up the UI
@@ -141,7 +159,8 @@ async function main() {
         console.log('Filling content...');
         try {
             // Content editor usually matches this
-            const contentEditor = await page.waitForSelector('#post-textarea, .ql-editor, .c-editor', { timeout: 5000 });
+            // Updated: Include generic contenteditable div as a fallback
+            const contentEditor = await page.waitForSelector('#post-textarea, .ql-editor, .c-editor, div[contenteditable="true"]', { timeout: 5000 });
             if (contentEditor) {
                 await contentEditor.click();
                 await contentEditor.type(draft.content || '', { delay: 50 });
