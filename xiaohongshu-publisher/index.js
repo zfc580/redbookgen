@@ -5,10 +5,6 @@ const path = require('path');
 
 puppeteer.use(StealthPlugin());
 
-// Re-use the user data dir from the parser to share login state
-const USER_DATA_DIR = path.resolve(__dirname, '../xiaohongshu-parser/user_data');
-// const USER_DATA_DIR = path.resolve(__dirname, 'user_data_temp_' + Date.now());
-
 async function parseArgs() {
     const args = process.argv.slice(2);
     let draftPath = '';
@@ -18,9 +14,7 @@ async function parseArgs() {
         if (args[i] === '--draft') draftPath = args[i + 1];
         if (args[i] === '--images') imagesDir = args[i + 1];
     }
-
     if (!draftPath || !imagesDir) {
-        console.error('Usage: node xiaohongshu-publisher/index.js --draft <JSON_PATH> --images <DIR_PATH>');
         process.exit(1);
     }
     return { draftPath, imagesDir };
@@ -28,162 +22,229 @@ async function parseArgs() {
 
 async function getImages(dir) {
     if (!fs.existsSync(dir)) return [];
-    return fs.readdirSync(dir)
-        .filter(file => /\.(png|jpg|jpeg|webp)$/i.test(file))
-        .map(file => path.join(dir, file))
-        .sort(); // Ensure order by filename (page_01, page_02...)
+    const files = fs.readdirSync(dir)
+        .filter(file => {
+            if (!/\.(png|jpg|jpeg|webp)$/i.test(file)) return false;
+            if (file.startsWith('debug_')) return false;
+            return true;
+        })
+        .sort();
+    return files.map(file => path.resolve(dir, file));
+}
+
+// 📌 Encapsulated Upload Logic for Retry
+async function performUpload(page, images) {
+    console.log('--- Starting Upload Process ---');
+
+    // 1. Switch to Image Tab
+    console.log('Switching to Image Tab...');
+    await page.waitForSelector('div, span', { timeout: 10000 });
+
+    // Explicitly click '上传图文'
+    const tabSwitchResult = await page.evaluate(() => {
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+        let node;
+        while (node = walker.nextNode()) {
+            if (node.textContent.trim() === '上传图文') {
+                node.parentElement.click();
+                return true;
+            }
+        }
+        return false;
+    });
+
+    if (!tabSwitchResult) {
+        console.warn('Tab switch via text failed, trying index fallback...');
+        const tabs = await page.$$('.tab-item, .header-tab');
+        if (tabs.length >= 2) {
+            await tabs[1].click();
+        }
+    }
+    await new Promise(r => setTimeout(r, 2000)); // wait for UI
+
+    // 2. Upload Files (Interaction Mode)
+    console.log('Uploading images via FileChooser interception...');
+
+    // Step A: Setup the interceptor
+    const fileChooserPromise = page.waitForFileChooser({ timeout: 30000 });
+
+    // Step B: Find and Click the "Upload Area"
+    const clickSuccess = await page.evaluate(() => {
+        // Try finding the specific "Upload" text
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+        let node;
+        while (node = walker.nextNode()) {
+            // "点击上传" (Click to Upload) or "拖拽" (Drag)
+            if (node.textContent.includes('点击上传') || node.textContent.includes('拖拽')) {
+                // Click the direct parent. Events usually bubble up to the listener.
+                console.log("Found upload text node, clicking parent:", node.parentElement);
+                node.parentElement.click();
+                return true;
+            }
+        }
+
+        // Fallback: Click generic upload class if text not found
+        const uploader = document.querySelector('.upload-input, .upload-btn, .file-picker, .upload-wrapper');
+        if (uploader) {
+            console.log("Found generic upload class");
+            uploader.click();
+            return true;
+        }
+        return false;
+    });
+
+    if (!clickSuccess) {
+        throw new Error('Could not find clickable Upload Area');
+    }
+
+    // Step C: Wait for the file chooser request and accept it
+    try {
+        const fileChooser = await fileChooserPromise;
+        await fileChooser.accept(images);
+        console.log(`✅ FileChooser intercepted. Uploading ${images.length} files...`);
+    } catch (e) {
+        console.error('File Picker did not appear within timeout!', e);
+        throw e;
+    }
+
+    // 3. Wait for processing (critical for redirect detection)
+    console.log('Waiting for upload processing...');
+    await new Promise(r => setTimeout(r, 5000));
+
+    // 4. CHECK FOR REDIRECT (The Fix)
+    const isLogin = await page.evaluate(() => {
+        return window.location.href.includes('login') ||
+            !!document.querySelector('.login-container') ||
+            !!document.querySelector('.qrcode-box');
+    });
+
+    if (isLogin) {
+        console.error('❌ REDIRECTED TO LOGIN AFTER UPLOAD!');
+        return { success: false, reason: 'login_redirect' };
+    }
+
+    // 5. Verify Thumbnails
+    const hasThumbnails = await page.evaluate(() => {
+        return !!document.querySelector('.drag-item, .preview-item, .image-preview, .media-list, .file-item');
+    });
+
+    if (!hasThumbnails) {
+        console.warn('⚠️ No thumbnails detected. Upload might have failed silently.');
+    }
+
+    return { success: true };
 }
 
 async function main() {
     const { draftPath, imagesDir } = await parseArgs();
 
     try {
-        // 1. Load Data
         if (!fs.existsSync(draftPath)) throw new Error(`Draft file not found: ${draftPath}`);
         const draft = JSON.parse(fs.readFileSync(draftPath, 'utf8'));
-
         const images = await getImages(imagesDir);
-        if (images.length === 0) throw new Error(`No images found in ${imagesDir}`);
 
-        console.log(`Preparing to publish:`);
-        console.log(`- Title: ${draft.title}`);
-        console.log(`- Images: ${images.length} files`);
+        console.log(`Preparing to publish: ${draft.title}`);
 
-        // 2. Launch Browser
-        const browser = await puppeteer.launch({
-            headless: false, // Must be visible for this kind of operation
-            defaultViewport: null,
-            userDataDir: USER_DATA_DIR,
-            args: ['--start-maximized', '--no-sandbox', '--disable-web-security']
-        });
-
-        const page = await browser.newPage();
-
-        // Go to Creator Center Publish Page
-        const PUBLISH_URL = 'https://creator.xiaohongshu.com/publish/publish';
-        console.log(`Navigating to ${PUBLISH_URL}...`);
-        await page.goto(PUBLISH_URL, { waitUntil: 'networkidle2', timeout: 60000 });
-        await page.screenshot({ path: path.join(imagesDir, 'debug_01_navigated.png') });
-
-        // 3. Check Login
-        // If redirected to login page, we need intervention
-        if (page.url().includes('login') || (await page.$('.login-container'))) {
-            console.log('!!! Login Session Expired... !!!');
-            await page.screenshot({ path: path.join(imagesDir, 'debug_02_login_fail.png') });
-            console.log('Waiting 120s for login...');
-            await page.waitForNavigation({ timeout: 120000, waitUntil: 'networkidle2' });
-        }
-        await page.screenshot({ path: path.join(imagesDir, 'debug_03_logged_in.png') });
-
-        // 4. Upload Images
-        console.log('Switching to Image Tab...');
-
-        // Robust Tab Switching Logic
-        // We need to find the tab that contains text "图文" (Image/Text) and click it.
+        // 🔹 CONNECT TO EXISTING BROWSER
+        console.log('Connecting to existing Chrome on port 9222...');
+        let browser;
         try {
-            // Wait for tabs to render
-            await page.waitForSelector('div, span', { timeout: 10000 });
-
-            const clicked = await page.evaluate(() => {
-                // Find all elements that might be the tab
-                const elements = Array.from(document.querySelectorAll('div, span, li, .title'));
-                for (const el of elements) {
-                    // Match "上传图文" exactly or "图文"
-                    // The text dump shows "上传图文" in a span.title
-                    if (el.innerText && (el.innerText.trim() === '上传图文' || el.innerText.trim() === '图文')) {
-                        el.click();
-                        return true;
-                    }
-                }
-                return false;
+            browser = await puppeteer.connect({
+                browserURL: 'http://127.0.0.1:9222',
+                defaultViewport: null,
             });
-
-            if (clicked) {
-                console.log('Clicked "Image/Text" tab via DOM evaluation.');
-                await new Promise(r => setTimeout(r, 2000)); // Wait for UI switch
-            } else {
-                console.warn('Could not identify "Image" tab. Assuming default or manual intervention needed.');
-            }
+            console.log('✅ Connected to existing Chrome!');
         } catch (e) {
-            console.error('Tab switching error:', e);
-        }
-
-        // Click the upload area first to wake up the UI
-        try {
-            const uploadBox = await page.$('.upload-container, .upload-wrapper, .file-picker');
-            if (uploadBox) await uploadBox.click();
-        } catch (e) { }
-
-        try {
-            await page.waitForSelector('input[type=file]', { timeout: 15000 });
-        } catch (e) {
-            console.error('Wait for file input failed!');
-            await page.screenshot({ path: path.join(imagesDir, 'debug_04_upload_fail.png') });
+            console.error('❌ Failed to connect to Chrome. Did you launch it with --remote-debugging-port=9222?');
             throw e;
         }
 
-        const uploadHandle = await page.$('input[type=file]');
-        if (uploadHandle) {
-            // Hack: Force the input to accept multiple files just in case the DOM attribute is missing
-            await page.evaluate((el) => el.setAttribute('multiple', ''), uploadHandle);
-            await uploadHandle.uploadFile(...images);
-            await page.screenshot({ path: path.join(imagesDir, 'debug_05_uploaded.png') });
+        const pages = await browser.pages();
+        // Find the page that is likely the creator center, or use the first one
+        let page = pages.find(p => p.url().includes('xiaohongshu.com')) || pages[0];
+
+        if (!page) {
+            console.log('No existing page found, creating new one...');
+            page = await browser.newPage();
         } else {
-            throw new Error('Could not find file input element.');
+            console.log(`Using existing page: ${page.url()}`);
+            await page.bringToFront();
         }
 
-        // Wait for upload processing
-        console.log('Waiting for images to process...');
-        await new Promise(r => setTimeout(r, 5000));
-        await page.screenshot({ path: path.join(imagesDir, 'debug_06_processing.png') });
+        const PUBLISH_URL = 'https://creator.xiaohongshu.com/publish/publish';
 
-        // 5. Fill Title
-        console.log('Filling title...');
-        // Use Puppeteer new locator or reliable css
-        // Title input usually has placeholder "填写标题..."
-        // Safe robust way: find input where placeholder includes '标题'
-        try {
-            // Using standard CSS selector with attribute partial match
-            const titleInput = await page.waitForSelector('input[placeholder*="标题"]', { timeout: 5000 });
+        // Only navigate if we are not already there to save time/risk
+        if (!page.url().includes('/publish/publish')) {
+            console.log(`Navigating to ${PUBLISH_URL}...`);
+            await page.goto(PUBLISH_URL, { waitUntil: 'networkidle2', timeout: 60000 });
+        } else {
+            console.log('Already on publish page, refreshing to ensure clean state...');
+            await page.reload({ waitUntil: 'networkidle2' });
+        }
+
+        // --- Upload Loop with Retry ---
+        let uploadSuccess = false;
+        let attempts = 0;
+
+        while (!uploadSuccess && attempts < 3) {
+            attempts++;
+            try {
+                const result = await performUpload(page, images);
+
+                if (result.success) {
+                    uploadSuccess = true;
+                    console.log('✅ Upload Sequence Completed Successfully.');
+                } else if (result.reason === 'login_redirect') {
+                    console.log('⏳ Waiting for manual login to complete (in your browser window)...');
+                    // Wait until back on publish page
+                    while (true) {
+                        await new Promise(r => setTimeout(r, 3000));
+                        const currentUrl = page.url();
+                        if (currentUrl.includes('/publish') && !currentUrl.includes('login')) {
+                            console.log('✅ Detected return to Publish Page! Retrying upload...');
+                            await page.reload({ waitUntil: 'networkidle2' });
+                            break;
+                        }
+                    }
+                }
+            } catch (e) {
+                console.error(`Attempt ${attempts} failed:`, e);
+                await new Promise(r => setTimeout(r, 3000));
+            }
+        }
+
+        if (!uploadSuccess) {
+            console.error('❌ Upload failed after multiple attempts. Please do it manually.');
+        } else {
+            // --- Fill Content ---
+            console.log('Filling title...');
+            let titleInput = await page.$('input[placeholder*="标题"]');
+            if (!titleInput) titleInput = await page.$('.title-input, .c-input');
+
             if (titleInput) {
                 await titleInput.click({ clickCount: 3 });
                 await titleInput.type(draft.title, { delay: 100 });
-                await page.screenshot({ path: path.join(imagesDir, 'debug_07_title_filled.png') });
+            } else {
+                console.warn('Could not find Title input!');
             }
-        } catch (e) {
-            console.warn('Could not find Title input: ' + e.message);
-            await page.screenshot({ path: path.join(imagesDir, 'debug_07_title_fail.png') });
-        }
 
-        // 6. Fill Content
-        console.log('Filling content...');
-        try {
-            // Content editor usually matches this
-            // Updated: Include generic contenteditable div as a fallback
-            const contentEditor = await page.waitForSelector('#post-textarea, .ql-editor, .c-editor, div[contenteditable="true"]', { timeout: 5000 });
+            console.log('Filling content...');
+            const contentEditor = await page.$('#post-textarea, .ql-editor, .c-editor, div[contenteditable="true"]');
             if (contentEditor) {
                 await contentEditor.click();
                 await contentEditor.type(draft.content || '', { delay: 50 });
-                await page.screenshot({ path: path.join(imagesDir, 'debug_08_content_filled.png') });
+            } else {
+                console.warn('Could not find Content editor!');
             }
-        } catch (e) {
-            console.warn('Could not find Content editor: ' + e.message);
-            await page.screenshot({ path: path.join(imagesDir, 'debug_08_content_fail.png') });
+
+            console.log('✅ Draft Filled! Please review and click Publish.');
         }
 
-        console.log('---------------------------------------------------');
-        console.log('✅ Draft Filled Successfully!');
-        console.log('⚠️  AUTO-PUBLISH IS DISABLED FOR SAFETY.');
-        console.log('👉 Please review the draft in the browser window.');
-        console.log('👉 Click "Publish" manually when ready.');
-        console.log('---------------------------------------------------');
-
-        // Keep browser open for user review
-        // await browser.close(); 
+        // Do not disconnect/close browser to let user publish
+        console.log('Done. Browser left open for you.');
 
     } catch (error) {
         console.error('Publisher Error:', error);
-        // Do not close browser on error so user can debug
     }
 }
 

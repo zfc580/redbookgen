@@ -23,3 +23,6 @@ xiaohongshu-publisher/user_data_temp_*/
 
 xiaohongshu-parser/cookies.json
 
+
+# Chrome Debug Profile (DO NOT COMMIT)
+chrome_debug_profile/
