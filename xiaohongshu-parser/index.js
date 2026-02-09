@@ -115,62 +115,150 @@ async function scrape(url) {
             await new Promise(r => setTimeout(r, 3000));
         }
 
+        // --- Robust Data Extraction ---
         console.log('Extracting data...');
 
-        // 1. Try __INITIAL_STATE__
-        const initialState = await page.evaluate(() => window.__INITIAL_STATE__);
+        // Method 1: Regex Extraction of __INITIAL_STATE__ from HTML source
+        // This is more reliable than window object because it doesn't depend on JS execution timing
+        const html = await page.content();
 
-        let data = {};
+        let match = null;
+        // Try multiple variations
+        const patterns = [
+            /window\.__INITIAL_STATE__\s*=\s*({.+?});/s,
+            /__INITIAL_STATE__\s*=\s*({.+?});/s,
+            /<script>window\.__INITIAL_STATE__=(.+?)<\/script>/
+        ];
 
-        if (initialState && initialState.note && initialState.note.noteDetailMap) {
-            console.log('Found __INITIAL_STATE__, extracting structured data.');
-            const keys = Object.keys(initialState.note.noteDetailMap);
-            // Try to find the one matching URL or just first one
-            // The noteId is the last part of URL usually
-            let targetKey = keys[0];
-            const noteData = initialState.note.noteDetailMap[targetKey].note;
+        for (const p of patterns) {
+            match = html.match(p);
+            if (match && match[1]) break;
+        }
 
-            if (noteData) {
-                data = {
-                    title: noteData.title,
-                    description: noteData.desc,
-                    tags: noteData.tagList ? noteData.tagList.map(t => t.name) : [],
-                    image_urls: noteData.imageList ? noteData.imageList.map(img => img.urlDefault || img.url) : []
+        let data = { title: '', description: '', tags: [], image_urls: [] };
+        let stateFound = false;
+
+        if (match && match[1]) {
+            try {
+                // The regex match might contain undefined as a value which isn't valid JSON
+                // We simply replace undefined with null just in case
+                let jsonStr = match[1].replace(/:undefined/g, ':null');
+                const state = JSON.parse(jsonStr);
+
+                // Deep search for note data
+                // We look for an object that has 'title', 'desc', and 'imageList'
+                const findNoteData = (obj) => {
+                    if (!obj || typeof obj !== 'object') return null;
+                    if (obj.title !== undefined && obj.desc !== undefined && Array.isArray(obj.imageList)) {
+                        return obj;
+                    }
+                    for (const key in obj) {
+                        const found = findNoteData(obj[key]);
+                        if (found) return found;
+                    }
+                    return null;
                 };
+
+                const noteData = findNoteData(state);
+
+                if (noteData) {
+                    console.log('✅ Successfully extracted structured data from __INITIAL_STATE__');
+                    data.title = noteData.title || '';
+                    data.description = noteData.desc || '';
+                    data.tags = noteData.tagList ? noteData.tagList.map(t => t.name) : [];
+
+                    // Extract High-Res Images
+                    // imageList elements usually have urlDefault, urlOriginal, etc.
+                    if (noteData.imageList && noteData.imageList.length > 0) {
+                        data.image_urls = noteData.imageList.map(img => {
+                            // Prioritize original/large images
+                            return img.urlOriginal || img.urlDefault || img.url || '';
+                        }).filter(u => !!u);
+
+                        // Fix protocol if missing
+                        data.image_urls = data.image_urls.map(u => u.startsWith('//') ? 'https:' + u : u);
+                    }
+                    stateFound = true;
+                } else {
+                    console.log('⚠️ __INITIAL_STATE__ found but could not locate note data structure.');
+                }
+
+            } catch (e) {
+                console.warn('⚠️ Failed to parse __INITIAL_STATE__ JSON:', e.message);
             }
         }
 
-        // 2. Fallback to DOM
-        if (!data.title) {
-            console.log('__INITIAL_STATE__ parse failed, fallback to DOM.');
-            data = await page.evaluate(() => {
+        // Method 2: Fallback to DOM (if State failed)
+        if (!stateFound || !data.title || data.image_urls.length === 0) {
+            console.log('🔄 Fallback: Extracting data from DOM...');
+
+            const domData = await page.evaluate(() => {
                 const titleEl = document.querySelector('.title') || document.querySelector('#detail-title');
                 const descEl = document.querySelector('.desc') || document.querySelector('#detail-desc');
+                const tagsRaw = Array.from(document.querySelectorAll('.tag, #detail-tag')).map(el => el.innerText.replace('#', ''));
 
-                // Try to find images in swiper
-                // Helper to get background image URL
-                const getBgUrl = (el) => {
-                    const bg = window.getComputedStyle(el).backgroundImage;
-                    return bg && bg !== 'none' ? bg.slice(4, -1).replace(/"/g, "") : null;
-                };
+                // Detailed Image Logic:
+                // 1. Look for 'swiper-slide' having background-image
+                // 2. Look for 'note-content' images
 
-                const imgEls = Array.from(document.querySelectorAll('.swiper-wrapper .swiper-slide span'));
-                let urls = imgEls.map(getBgUrl).filter(u => u && u.startsWith('http'));
+                let urls = [];
 
-                // Fallback: looking for normal img tags if not swiper
+                // Strategy A: Swiper Slides (Background Images)
+                const slides = document.querySelectorAll('.swiper-slide');
+                if (slides.length > 0) {
+                    slides.forEach(slide => {
+                        // Often the image is in a span's background
+                        const span = slide.querySelector('span');
+                        const style = span ? window.getComputedStyle(span) : window.getComputedStyle(slide);
+                        let bg = style.backgroundImage;
+                        if (bg && bg !== 'none') {
+                            // Remove url("...") wrapper
+                            const url = bg.slice(4, -1).replace(/"/g, "");
+                            if (url.startsWith('http') || url.startsWith('//')) {
+                                urls.push(url);
+                            }
+                        }
+                    });
+                }
+
+                // Strategy B: Img tags (sometimes used in different layouts)
                 if (urls.length === 0) {
-                    const imgs = Array.from(document.querySelectorAll('.note-content img, .media-container img'));
-                    urls = imgs.map(img => img.src);
+                    const imgs = document.querySelectorAll('.note-content img, .media-container img, main img');
+                    imgs.forEach(img => {
+                        if (img.src && img.src.startsWith('http')) {
+                            // Filter out avatars or icons if possible? 
+                            // Usually note images are large.
+                            if (img.width > 200 || img.height > 200) {
+                                urls.push(img.src);
+                            }
+                        }
+                    });
                 }
 
                 return {
                     title: titleEl ? titleEl.innerText : '',
                     description: descEl ? descEl.innerText : '',
+                    tags: tagsRaw,
                     image_urls: urls
                 };
             });
+
+            // Merge DOM data if State failed
+            if (!data.title) data.title = domData.title;
+            if (!data.description) data.description = domData.description;
+            if (data.tags.length === 0) data.tags = domData.tags;
+            // Only overwrite images if we truly failed to get them from state
+            if (data.image_urls.length === 0) data.image_urls = domData.image_urls;
+
+            // If we still found nothing, and we are in a browser, maybe try to click dots?
+            // (Skipped for now to keep it fast, usually JSON works)
         }
 
+        // Final Cleanup
+        data.image_urls = [...new Set(data.image_urls)]; // Dedup
+        data.image_urls = data.image_urls.map(u => u.startsWith('//') ? 'https:' + u : u);
+
+        console.log(`Found ${data.image_urls.length} images.`);
         return data;
 
     } catch (error) {
