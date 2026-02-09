@@ -38,9 +38,8 @@ const SYSTEM_PROMPT = `
 
 ### 1. 文案要求 (draft)
 - **标题**：
-  - **必须严格控制在 16-20 个中文字符之间**。
-  - 必须包含点击钩子（如数字、悬念、痛点、强情绪词）。
-  - 只能提供 1 个最佳标题。
+  - **严禁超过 20 个字符（包含标点符号、Emoji）**。
+  - **建议 18-20 字最佳**。
 - **正文**：
   - 必须融合图片中提取出来的关键信息（如果图片里有干货而在正文中未提及，记得补全）。
   - 采用小红书爆款风格（Emoji丰富、分段清晰、口语化）。
@@ -49,7 +48,12 @@ const SYSTEM_PROMPT = `
 
 ### 2. 作图指令要求 (visual_script)
 这是一个数组，每个元素代表一张图的生成脚本，你需要为 AI 绘图师详细描述每一张图的画面。
-- **必须覆盖 3-5 张图**。
+- **图片数量原则**：请优先参考【原始笔记】的图片数量（如果原笔记有 N 张图，尽量也规划 N 张）。
+- **最终决定权**：如果原图太少无法讲清，或者原图太多内容重复，你可以根据内容的逻辑完整性进行增减。一切以“把事情讲清楚、讲精彩”为最高准则。
+- **结构建议**：
+  - **封面图**：必须极具吸引力。
+  - **内容图**：根据知识点拆分，确保信息密度适中。
+  - **结尾图**：互动或总结。
 - **Content 字段必须极其详细**，包含以下维度：
   1. **【总体画面】**：描述背景色、构图方式（上下结构/左右结构/居中）、核心视觉元素（人物/物体/图标）。
   2. **【文字内容】**：你需要把这张图上出现的每一个字都写清楚。明确区分“主标题”、“副标题”、“正文列表”、“标注文字”。
@@ -151,7 +155,24 @@ async function callGemini(rawContent) {
             throw new Error(`Gemini API Error: ${data.error.message}`);
         }
 
-        const textOutput = data.candidates[0].content.parts[0].text;
+        if (!data.candidates || !data.candidates[0].content) {
+            throw new Error('Gemini API returned no candidates');
+        }
+
+        let textOutput = data.candidates[0].content.parts[0].text;
+
+        // --- Robust JSON Parsing ---
+        // 1. Remove Markdown code blocks
+        textOutput = textOutput.replace(/```json/g, '').replace(/```/g, '');
+
+        // 2. Find the first '{' and last '}'
+        const firstOpen = textOutput.indexOf('{');
+        const lastClose = textOutput.lastIndexOf('}');
+
+        if (firstOpen !== -1 && lastClose !== -1 && lastClose > firstOpen) {
+            textOutput = textOutput.substring(firstOpen, lastClose + 1);
+        }
+
         return JSON.parse(textOutput);
 
     } catch (error) {
